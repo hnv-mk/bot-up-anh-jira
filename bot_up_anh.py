@@ -143,7 +143,7 @@ def handle_photos(message):
         return
         
     trainee_id = user_states[chat_id]["trainee_id"]
-    ho_ten = user_states[chat_id]["ho_ho_ten"]
+    ho_ten = user_states[chat_id]["ho_ten"]
     
     msg_status = bot.reply_to(message, f"⏳ Đang nén ảnh và đẩy lên Jira cho **{ho_ten}**...", parse_mode="Markdown")
     
