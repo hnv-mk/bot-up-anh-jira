@@ -8,9 +8,10 @@ from PIL import Image
 from flask import Flask
 import threading
 import os
+import time
 
 # ==========================================
-# CẤU HÌNH BOT VÀ API JIRA
+# 1. CẤU HÌNH BOT VÀ API JIRA
 # ==========================================
 TELEGRAM_TOKEN = "8622942090:AAF1vPF-D5tFMx_pGdL-mVMEvAHHzxI-a0c"
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
@@ -19,11 +20,11 @@ JIRA_USER = "minhkhang_dat@shlx.vn"
 JIRA_PASS = "Anhduc9683@"
 JIRA_TOKEN = ""
 
-# Bộ nhớ tạm để lưu người dùng đang chọn học viên nào
+# Bộ nhớ tạm để lưu trạng thái người dùng
 user_states = {}
 
 # ==========================================
-# HÀM XỬ LÝ ẢNH & ĐĂNG NHẬP
+# 2. HÀM XỬ LÝ ẢNH & ĐĂNG NHẬP API
 # ==========================================
 def login_jira():
     global JIRA_TOKEN
@@ -34,9 +35,11 @@ def login_jira():
     return False
 
 def compress_image_from_bytes(image_bytes):
+    # Nếu ảnh đã nhỏ hơn 1MB thì giữ nguyên
     if len(image_bytes) <= 1024 * 1024:
         return image_bytes, "image/jpeg"
         
+    # Nén ảnh nếu lớn hơn 1MB
     with Image.open(io.BytesIO(image_bytes)) as img:
         if img.mode != 'RGB': 
             img = img.convert('RGB')
@@ -46,7 +49,7 @@ def compress_image_from_bytes(image_bytes):
         return output.getvalue(), "image/jpeg"
 
 # ==========================================
-# PHA 1: NHẬN CHỮ -> TÌM HỌC VIÊN
+# 3. PHA 1: NHẬN CHỮ -> TÌM HỌC VIÊN
 # ==========================================
 @bot.message_handler(content_types=['text'])
 def handle_text_search(message):
@@ -54,6 +57,7 @@ def handle_text_search(message):
     chat_id = message.chat.id
     raw_text = message.text.strip()
     
+    # Bóc tách CCCD hoặc Tên, lọc các từ khóa rác
     cccd_match = re.search(r'\b\d{9}\b|\b\d{12}\b', raw_text)
     cccd = cccd_match.group(0) if cccd_match else ""
     
@@ -118,7 +122,7 @@ def handle_text_search(message):
     bot.edit_message_text(f"✅ Đã tìm thấy **{len(items)}** kết quả.\n👇 Bấm chọn học viên để UP ẢNH:", chat_id, msg_status.message_id, reply_markup=markup, parse_mode="Markdown")
 
 # ==========================================
-# PHA TẦM TRUNG: CHỌN HỌC VIÊN
+# 4. PHA TẦM TRUNG: CHỌN HỌC VIÊN
 # ==========================================
 @bot.callback_query_handler(func=lambda call: call.data.startswith('up_'))
 def handle_select_trainee(call):
@@ -127,11 +131,18 @@ def handle_select_trainee(call):
     trainee_id = data[1]
     ho_ten = data[2]
     
-    user_states[chat_id] = {"trainee_id": trainee_id, "ho_ten": ho_ten}
+    # Thiết lập bộ nhớ đệm và reset bộ đếm ảnh
+    user_states[chat_id] = {
+        "trainee_id": trainee_id, 
+        "ho_ten": ho_ten,
+        "success_count": 0,         
+        "summary_msg_id": None      
+    }
+    
     bot.edit_message_text(f"🎯 Bạn đang chọn up ảnh cho: **{ho_ten}**\n\n📸 Hãy gửi hoặc Forward (chuyển tiếp) các bức ảnh vào đây ngay nào!", chat_id, call.message.message_id, parse_mode="Markdown")
 
 # ==========================================
-# PHA 2: NHẬN ẢNH -> NÉN -> UPLOAD JIRA
+# 5. PHA 2: NHẬN ẢNH -> NÉN -> UPLOAD JIRA -> DỌN DẸP
 # ==========================================
 @bot.message_handler(content_types=['photo', 'document'])
 def handle_photos(message):
@@ -145,7 +156,7 @@ def handle_photos(message):
     trainee_id = user_states[chat_id]["trainee_id"]
     ho_ten = user_states[chat_id]["ho_ten"]
     
-    msg_status = bot.reply_to(message, f"⏳ Đang nén ảnh và đẩy lên Jira cho **{ho_ten}**...", parse_mode="Markdown")
+    msg_status = bot.reply_to(message, f"⏳ Đang xử lý ảnh...", parse_mode="Markdown")
     
     try:
         if message.content_type == 'photo':
@@ -153,36 +164,56 @@ def handle_photos(message):
         elif message.content_type == 'document' and message.document.mime_type.startswith('image/'):
             file_id = message.document.file_id
         else:
-            bot.edit_message_text("❌ File gửi lên không phải là ảnh hợp lệ.", chat_id, msg_status.message_id)
+            bot.edit_message_text("❌ File gửi lên không hợp lệ.", chat_id, msg_status.message_id)
             return
 
+        # Tải ảnh từ Telegram và Nén
         file_info = bot.get_file(file_id)
         downloaded_file = bot.download_file(file_info.file_path)
-        
         img_bytes, mime_type = compress_image_from_bytes(downloaded_file)
         
+        # Gọi API Up ảnh lên Jira
         if not JIRA_TOKEN: login_jira()
         url_upload = f"https://jira.shlx.vn/v1/trainees/{trainee_id}/faces2"
         files = {"files": ("telegram_photo.jpg", img_bytes, mime_type)}
-        
         res_upload = requests.post(url_upload, headers={"Authorization": JIRA_TOKEN}, files=files)
         
+        # --- DỌN DẸP KHUNG CHAT ---
+        try:
+            bot.delete_message(chat_id, msg_status.message_id) # Xóa thông báo "Đang xử lý..."
+            bot.delete_message(chat_id, message.message_id)    # Xóa bức ảnh bạn vừa gửi
+        except:
+            pass
+        
+        # --- XỬ LÝ KẾT QUẢ VÀ NHẢY SỐ ---
         if 200 <= res_upload.status_code < 300:
-            bot.edit_message_text(f"✅ THÀNH CÔNG! Đã up ảnh cực nét cho: **{ho_ten}**", chat_id, msg_status.message_id, parse_mode="Markdown")
+            user_states[chat_id]["success_count"] += 1
+            count = user_states[chat_id]["success_count"]
+            
+            text_thanh_cong = f"✅ **HOÀN TẤT:** Đã up thành công tổng cộng **{count}** ảnh cho HV **{ho_ten}**"
+            
+            if user_states[chat_id]["summary_msg_id"] is None:
+                msg_tong = bot.send_message(chat_id, text_thanh_cong, parse_mode="Markdown")
+                user_states[chat_id]["summary_msg_id"] = msg_tong.message_id
+            else:
+                try:
+                    bot.edit_message_text(text_thanh_cong, chat_id, user_states[chat_id]["summary_msg_id"], parse_mode="Markdown")
+                except: 
+                    pass
         else:
-            bot.edit_message_text(f"❌ Lỗi Upload từ Jira: {res_upload.text}", chat_id, msg_status.message_id)
+            bot.send_message(chat_id, f"❌ Lỗi Upload Jira: {res_upload.text}")
             
     except Exception as e:
-        bot.edit_message_text(f"❌ Có lỗi khi nén/up ảnh: {str(e)}", chat_id, msg_status.message_id)
+        bot.send_message(chat_id, f"❌ Có lỗi khi nén/up ảnh: {str(e)}")
 
 # ==========================================
-# LÁCH LUẬT RENDER ĐỂ CHẠY 24/7
+# 6. LÁCH LUẬT RENDER ĐỂ CHẠY 24/7
 # ==========================================
 app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Web giả của Bot Up Ảnh đang hoạt động!"
+    return "Web giả của Bot Up Ảnh đang hoạt động 24/7!"
 
 def run_web():
     port = int(os.environ.get("PORT", 8080))
