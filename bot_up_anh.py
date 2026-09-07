@@ -28,10 +28,13 @@ user_states = {}
 # ==========================================
 def login_jira():
     global JIRA_TOKEN
-    res = requests.post("https://jira.shlx.vn/v1/login", json={"email": JIRA_USER, "password": JIRA_PASS}, headers={"x-client-app": "jira"})
-    if res.status_code == 200:
-        JIRA_TOKEN = f"Bearer {res.json().get('access_token')}"
-        return True
+    try:
+        res = requests.post("https://jira.shlx.vn/v1/login", json={"email": JIRA_USER, "password": JIRA_PASS}, headers={"x-client-app": "jira"})
+        if res.status_code == 200:
+            JIRA_TOKEN = f"Bearer {res.json().get('access_token')}"
+            return True
+    except:
+        pass
     return False
 
 def compress_image_from_bytes(image_bytes):
@@ -101,8 +104,13 @@ def handle_text_search(message):
     url_search = f"https://jira.shlx.vn/v1/trainees?name={urllib.parse.quote(search_query)}&page=1"
     res_search = requests.get(url_search, headers={"Authorization": JIRA_TOKEN})
     
+    # --- CƠ CHẾ TỰ ĐỘNG GIA HẠN TOKEN KHI TRA CỨU ---
+    if res_search.status_code in [401, 403]:
+        login_jira() # Đăng nhập lại
+        res_search = requests.get(url_search, headers={"Authorization": JIRA_TOKEN}) # Thử lại
+    
     if res_search.status_code != 200:
-        bot.edit_message_text("❌ Lỗi kết nối đến API Jira.", chat_id, msg_status.message_id)
+        bot.edit_message_text(f"❌ Lỗi kết nối đến API Jira (Mã lỗi: {res_search.status_code}).", chat_id, msg_status.message_id)
         return
         
     items = res_search.json().get("items", [])
@@ -178,6 +186,12 @@ def handle_photos(message):
         files = {"files": ("telegram_photo.jpg", img_bytes, mime_type)}
         res_upload = requests.post(url_upload, headers={"Authorization": JIRA_TOKEN}, files=files)
         
+        # --- CƠ CHẾ TỰ ĐỘNG GIA HẠN TOKEN KHI UP ẢNH ---
+        if res_upload.status_code in [401, 403]:
+            login_jira() # Đăng nhập lại
+            files = {"files": ("telegram_photo.jpg", img_bytes, mime_type)} # Đóng gói lại file
+            res_upload = requests.post(url_upload, headers={"Authorization": JIRA_TOKEN}, files=files) # Thử lại
+            
         # --- DỌN DẸP KHUNG CHAT ---
         try:
             bot.delete_message(chat_id, msg_status.message_id) # Xóa thông báo "Đang xử lý..."
@@ -201,7 +215,7 @@ def handle_photos(message):
                 except: 
                     pass
         else:
-            bot.send_message(chat_id, f"❌ Lỗi Upload Jira: {res_upload.text}")
+            bot.send_message(chat_id, f"❌ Lỗi Upload Jira (Mã: {res_upload.status_code}): {res_upload.text}")
             
     except Exception as e:
         bot.send_message(chat_id, f"❌ Có lỗi khi nén/up ảnh: {str(e)}")
